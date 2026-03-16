@@ -1,19 +1,18 @@
 import csv
 import html
+import json
 import re
+import urllib.request
 from typing import Any, Dict, List, Optional
-
-import requests
 
 STORE_URL = "https://babynatur.hr"
 PRODUCTS_ENDPOINT = f"{STORE_URL}/products.json?limit=250"
-OUTPUT_FILE = "babynatur_google_ads_feed.csv"
+OUTPUT_FILE = "feed.csv"
 CURRENCY = "EUR"
 TIMEOUT = 30
 
 
 def clean_text(value: Optional[str]) -> str:
-    """Clean HTML/text for CSV output."""
     if not value:
         return ""
     value = html.unescape(value)
@@ -23,8 +22,7 @@ def clean_text(value: Optional[str]) -> str:
     return value
 
 
-def to_shopify_cdn_url(src: str) -> str:
-    """Normalize image URL."""
+def normalize_url(src: str) -> str:
     if not src:
         return ""
     if src.startswith("//"):
@@ -32,28 +30,30 @@ def to_shopify_cdn_url(src: str) -> str:
     return src
 
 
-def get_products() -> List[Dict[str, Any]]:
-    response = requests.get(PRODUCTS_ENDPOINT, timeout=TIMEOUT)
-    response.raise_for_status()
-    data = response.json()
+def fetch_products() -> List[Dict[str, Any]]:
+    req = urllib.request.Request(
+        PRODUCTS_ENDPOINT,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+        data = json.load(response)
 
     products = data.get("products", [])
     if not isinstance(products, list):
         raise ValueError("Unexpected JSON format: 'products' is not a list.")
-
     return products
 
 
 def build_variant_image_map(product: Dict[str, Any]) -> Dict[int, str]:
-    """
-    Map variant_id -> image_url using image.variant_ids where available.
-    """
     variant_image_map: Dict[int, str] = {}
 
     for image in product.get("images", []) or []:
-        image_url = to_shopify_cdn_url(image.get("src", ""))
+        image_url = normalize_url(image.get("src", ""))
         for variant_id in image.get("variant_ids", []) or []:
-            variant_image_map[int(variant_id)] = image_url
+            try:
+                variant_image_map[int(variant_id)] = image_url
+            except (TypeError, ValueError):
+                pass
 
     return variant_image_map
 
@@ -61,17 +61,14 @@ def build_variant_image_map(product: Dict[str, Any]) -> Dict[int, str]:
 def pick_default_image(product: Dict[str, Any]) -> str:
     images = product.get("images", []) or []
     if images:
-        return to_shopify_cdn_url(images[0].get("src", ""))
+        return normalize_url(images[0].get("src", ""))
     image = product.get("image")
     if isinstance(image, dict):
-        return to_shopify_cdn_url(image.get("src", ""))
+        return normalize_url(image.get("src", ""))
     return ""
 
 
 def format_price(price_value: Any) -> str:
-    """
-    Format price as expected in feed, e.g. '42.00 EUR'
-    """
     if price_value in (None, ""):
         return ""
     try:
@@ -94,8 +91,7 @@ def build_rows(products: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         if not product_id or not handle:
             continue
 
-        variants = product.get("variants", []) or []
-        for variant in variants:
+        for variant in product.get("variants", []) or []:
             variant_id = variant.get("id")
             if not variant_id:
                 continue
@@ -104,38 +100,28 @@ def build_rows(products: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             variant_price = variant.get("price", "")
             variant_compare_at = variant.get("compare_at_price", "")
 
-            # Build feed ID to match current tracking format
             feed_id = f"shopify_ZZ_{product_id}_{variant_id}"
 
-            # Build title
             if variant_title and variant_title.lower() != "default title":
                 item_title = f"{product_title} - {variant_title}"
+                item_subtitle = variant_title
             else:
                 item_title = product_title
+                item_subtitle = ""
 
-            # Build product URL
             final_url = f"{STORE_URL}/products/{handle}?variant={variant_id}"
-
-            # Pick best image
             image_url = variant_image_map.get(int(variant_id), default_image)
 
-            # Subtitle can be variant title if useful
-            item_subtitle = variant_title if variant_title.lower() != "default title" else ""
-
-            # Prefer variant title + product type in description if available
-            description = product_description
-
-            row = {
+            rows.append({
                 "ID": feed_id,
                 "Item title": item_title,
                 "Final URL": final_url,
                 "Image URL": image_url,
                 "Price": format_price(variant_price),
-                "Description": description,
+                "Description": product_description,
                 "Item subtitle": item_subtitle,
                 "Sale price": format_price(variant_compare_at) if variant_compare_at else "",
-            }
-            rows.append(row)
+            })
 
     return rows
 
@@ -159,10 +145,9 @@ def write_csv(rows: List[Dict[str, str]], output_file: str) -> None:
 
 
 def main() -> None:
-    products = get_products()
+    products = fetch_products()
     rows = build_rows(products)
     write_csv(rows, OUTPUT_FILE)
-
     print(f"Products fetched: {len(products)}")
     print(f"Feed rows written: {len(rows)}")
     print(f"Saved to: {OUTPUT_FILE}")
