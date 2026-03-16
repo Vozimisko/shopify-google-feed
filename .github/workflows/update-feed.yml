@@ -1,5 +1,8 @@
 name: Update Shopify feed
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   workflow_dispatch:
   schedule:
@@ -24,6 +27,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
 
       - name: Generate feed
         run: python generate_feed.py
