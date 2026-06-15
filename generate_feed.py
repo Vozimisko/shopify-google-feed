@@ -2,7 +2,7 @@ import csv
 import html
 import json
 import re
-import urllib.request
+import requests
 from typing import Any, Dict, List, Optional
 
 STORE_URL = "https://babynatur.hr"
@@ -31,16 +31,24 @@ def normalize_url(src: str) -> str:
 
 
 def fetch_products() -> List[Dict[str, Any]]:
-    req = urllib.request.Request(
+    response = requests.get(
         PRODUCTS_ENDPOINT,
-        headers={"User-Agent": "Mozilla/5.0"}
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://babynatur.hr/",
+        },
+        timeout=TIMEOUT
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-        data = json.load(response)
+
+    response.raise_for_status()
+    data = response.json()
 
     products = data.get("products", [])
     if not isinstance(products, list):
         raise ValueError("Unexpected JSON format: 'products' is not a list.")
+
     return products
 
 
@@ -85,6 +93,7 @@ def build_rows(products: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         handle = product.get("handle", "")
         product_title = clean_text(product.get("title", ""))
         product_description = clean_text(product.get("body_html", ""))
+
         default_image = pick_default_image(product)
         variant_image_map = build_variant_image_map(product)
 
@@ -148,6 +157,7 @@ def main() -> None:
     products = fetch_products()
     rows = build_rows(products)
     write_csv(rows, OUTPUT_FILE)
+
     print(f"Products fetched: {len(products)}")
     print(f"Feed rows written: {len(rows)}")
     print(f"Saved to: {OUTPUT_FILE}")
