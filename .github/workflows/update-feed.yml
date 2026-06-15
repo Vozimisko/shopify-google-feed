@@ -31,10 +31,6 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Test endpoint
-        run: |
-          curl -v "https://babynatur.hr/products.json?limit=250"
-
       - name: Generate feed
         run: python generate_feed.py
 
