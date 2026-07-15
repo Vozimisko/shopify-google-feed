@@ -1,4 +1,4 @@
-name: Update Shopify feed
+name: Update Homedeco feed
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
