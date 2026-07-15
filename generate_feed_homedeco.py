@@ -2,7 +2,7 @@ import csv
 import html
 import re
 import time
-import requests
+from curl_cffi import requests
 from typing import Any, Dict, List, Optional
 
 STORE_URL = "https://www.homedeco.hr"
@@ -13,7 +13,6 @@ TIMEOUT = 30
 REQUEST_DELAY = 0.5  # be polite to the server between pages
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
     "Accept": "application/json,text/plain,*/*",
     "Accept-Language": "hr-HR,hr;q=0.9,en;q=0.8",
     "Referer": f"{STORE_URL}/",
@@ -50,6 +49,7 @@ def fetch_all_products() -> List[Dict[str, Any]]:
             PRODUCTS_ENDPOINT,
             params={"per_page": PER_PAGE, "page": page},
             headers=HEADERS,
+            impersonate="chrome",
             timeout=TIMEOUT,
         )
         response.raise_for_status()
