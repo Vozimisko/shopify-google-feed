@@ -9,7 +9,7 @@ STORE_URL = "https://www.homedeco.hr"
 PRODUCTS_ENDPOINT = f"{STORE_URL}/wp-json/wc/store/v1/products"
 OUTPUT_FILE = "feed_homedeco.csv"
 PER_PAGE = 100
-TIMEOUT = 30
+TIMEOUT = 90
 REQUEST_DELAY = 0.5  # be polite to the server between pages
 
 HEADERS = {
