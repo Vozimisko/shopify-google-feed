@@ -3,8 +3,8 @@ Generate product feeds for Google Ads (dynamic remarketing) and Google
 Merchant Center from the public Shopify products.json endpoint.
 
 Outputs:
-    feed.tsv                  - Google Ads dynamic remarketing schema
-    merchant_center_feed.tsv  - Merchant Center product feed schema
+    feed_ga.tsv  - Google Ads dynamic remarketing schema
+    feed_mc.tsv  - Merchant Center product feed schema
 
 Both are UTF-8 (no BOM), tab-separated, written atomically after validation.
 
@@ -31,8 +31,8 @@ TIMEOUT = 30
 PAGE_LIMIT = 250
 MAX_PAGES = 40  # safety stop: 10,000 products
 
-ADS_OUTPUT = "feed.tsv"
-MC_OUTPUT = "merchant_center_feed.tsv"
+ADS_OUTPUT = "feed_ga.tsv"
+MC_OUTPUT = "feed_mc.tsv"
 
 BRAND_FALLBACK = "Baby Natur"
 CONDITION = "new"
