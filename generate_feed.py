@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import tempfile
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
@@ -91,28 +92,86 @@ class FeedError(Exception):
 # text helpers
 # --------------------------------------------------------------------------
 
-def clean_text(value: Optional[str]) -> str:
-    """Strip HTML, unescape entities, collapse whitespace.
+class _TextExtractor(HTMLParser):
+    """Collect visible text, discarding tags, attributes and script/style bodies.
 
-    Tags are removed before unescaping so that escaped markup in the source
-    (&lt;script&gt;) cannot become live markup in the output.
+    A regex cannot do this correctly: `<[^>]+>` stops at the first `>`, so a
+    tag whose attribute value contains one - Tailwind selectors like
+    `class="[&>div]:flex"` are a common source - terminates the match early and
+    spills the rest of the tag into the output as visible text.
     """
+
+    BLOCK_TAGS = {"p", "div", "br", "li", "tr", "td", "h1", "h2", "h3", "h4",
+                  "h5", "h6", "ul", "ol", "table", "section", "article"}
+    SKIP_TAGS = {"script", "style", "noscript", "template"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in self.SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag in self.BLOCK_TAGS:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self.SKIP_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+        elif tag in self.BLOCK_TAGS:
+            self.parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        return "".join(self.parts)
+
+
+# Characters that are legal in a string but hostile in a TSV cell.
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+# Signatures of markup that leaked through into visible copy.
+MARKUP_RESIDUE = re.compile(
+    r"(class=|style=|data-[a-z-]+=|dir=\"|<[a-z/]|&[a-z]{2,6};|\{[^}]*:[^}]*\})",
+    re.IGNORECASE,
+)
+
+
+def clean_text(value: Optional[str]) -> str:
+    """Strip HTML, unescape entities, collapse whitespace."""
     if not value:
         return ""
-    value = re.sub(r"<br\s*/?>", " ", value, flags=re.IGNORECASE)
-    value = re.sub(r"</\s*(p|div|li|tr|h[1-6])\s*>", " ", value, flags=re.IGNORECASE)
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = html.unescape(value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
+
+    parser = _TextExtractor()
+    try:
+        parser.feed(value)
+        parser.close()
+        text = parser.text()
+    except Exception:
+        # Malformed markup should degrade, not kill the run.
+        text = re.sub(r"<[^>]*>", " ", value)
+        text = html.unescape(text)
+
+    text = CONTROL_CHARS.sub(" ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def tsv_safe(value: Any) -> str:
-    """Neutralise characters that would break a tab-separated row."""
+    """Neutralise characters that would break a tab-separated row.
+
+    With QUOTE_NONE there is no quoting mechanism to fall back on, so anything
+    that could be read as structure has to be removed here.
+    """
     if value is None:
         return ""
     text = str(value)
-    return text.replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+    text = text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    text = CONTROL_CHARS.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def truncate(value: str, limit: int) -> str:
@@ -336,6 +395,12 @@ def build_rows(products: List[Dict[str, Any]]) -> Tuple[List[Dict[str, str]], Li
                 f"product {product_id} ({product_title}) has no description - "
                 "using the title as a fallback"
             )
+        elif MARKUP_RESIDUE.search(description):
+            warnings.append(
+                f"product {product_id} ({product_title}) description contains "
+                "markup residue - the source HTML in Shopify is likely pasted "
+                "from a rich-text editor and should be cleaned"
+            )
 
         for variant in product.get("variants", []) or []:
             variant_id = variant.get("id")
@@ -510,7 +575,8 @@ def write_tsv(rows: List[Dict[str, str]], columns: List[str], path: str) -> None
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(
                 fh, fieldnames=columns, delimiter="\t",
-                quoting=csv.QUOTE_NONE, escapechar=None, lineterminator="\n",
+                quoting=csv.QUOTE_NONE, quotechar=None, escapechar=None,
+                lineterminator="\n",
             )
             writer.writeheader()
             for row in rows:
