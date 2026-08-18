@@ -78,6 +78,9 @@ MAX_ADDITIONAL_IMAGES = 10
 # Validation guardrails.
 MIN_EXPECTED_ROWS = 50
 MAX_SHRINK_RATIO = 0.7  # fail if the feed drops below 70% of the previous run
+MAX_REJECT_RATIO = 0.05  # fail if more than 5% of rows are unusable...
+MIN_REJECT_ALLOWANCE = 3  # ...but always tolerate this many, so a small
+#                           catalogue isn't held hostage by the percentage
 
 
 class FeedError(Exception):
@@ -325,7 +328,14 @@ def build_rows(products: List[Dict[str, Any]]) -> Tuple[List[Dict[str, str]], Li
         excluded = is_excluded_from_mc(product)
 
         if not description:
-            warnings.append(f"product {product_id} ({product_title}) has no description")
+            # description is required by Merchant Center. Falling back to the
+            # title keeps the item eligible instead of dropping it, but it is a
+            # weak description - fix the product in Shopify.
+            description = product_title
+            warnings.append(
+                f"product {product_id} ({product_title}) has no description - "
+                "using the title as a fallback"
+            )
 
         for variant in product.get("variants", []) or []:
             variant_id = variant.get("id")
@@ -436,27 +446,55 @@ def previous_row_count(path: str) -> Optional[int]:
 
 
 def validate(rows: List[Dict[str, str]], columns: List[str], required: List[str],
-             path: str, label: str) -> None:
-    """Refuse to ship a feed that is empty, duplicated, or suspiciously small."""
-    if len(rows) < MIN_EXPECTED_ROWS:
-        raise FeedError(f"{label}: only {len(rows)} rows, expected at least {MIN_EXPECTED_ROWS}")
+             path: str, label: str) -> Tuple[List[Dict[str, str]], List[str]]:
+    """Quarantine unusable rows; fail only if the feed as a whole is unsound.
 
-    ids = [row[columns[0]] for row in rows]
-    if len(ids) != len(set(ids)):
-        duplicates = {i for i in ids if ids.count(i) > 1}
-        raise FeedError(f"{label}: duplicate IDs: {sorted(duplicates)[:5]}")
+    One malformed product out of hundreds should not stop the other hundreds
+    from reaching Google, so bad rows are dropped and reported rather than
+    raising. The job still fails if too many rows are bad at once, which is
+    the signature of an upstream change rather than one neglected product.
+    """
+    good: List[Dict[str, str]] = []
+    rejected: List[str] = []
+    seen: set = set()
 
     for row in rows:
+        row_id = row.get(columns[0], "?")
+
         missing = [field for field in required if not row.get(field)]
         if missing:
-            raise FeedError(f"{label}: row {row[columns[0]]} missing {missing}")
+            rejected.append(f"{row_id}: missing {', '.join(missing)}")
+            continue
+
+        if row_id in seen:
+            rejected.append(f"{row_id}: duplicate ID")
+            continue
+
+        seen.add(row_id)
+        good.append(row)
+
+    if not good:
+        raise FeedError(f"{label}: every row was rejected")
+
+    reject_ratio = len(rejected) / max(len(rows), 1)
+    if len(rejected) > MIN_REJECT_ALLOWANCE and reject_ratio > MAX_REJECT_RATIO:
+        raise FeedError(
+            f"{label}: rejected {len(rejected)} of {len(rows)} rows "
+            f"({reject_ratio:.0%}), above the {MAX_REJECT_RATIO:.0%} ceiling. "
+            "This looks like an upstream change, not a data-entry problem."
+        )
+
+    if len(good) < MIN_EXPECTED_ROWS:
+        raise FeedError(f"{label}: only {len(good)} usable rows, expected at least {MIN_EXPECTED_ROWS}")
 
     previous = previous_row_count(path)
-    if previous and len(rows) < previous * MAX_SHRINK_RATIO:
+    if previous and len(good) < previous * MAX_SHRINK_RATIO:
         raise FeedError(
-            f"{label}: row count dropped from {previous} to {len(rows)} - "
+            f"{label}: row count dropped from {previous} to {len(good)} - "
             "refusing to overwrite. Re-run with --force if this is intentional."
         )
+
+    return good, rejected
 
 
 def write_tsv(rows: List[Dict[str, str]], columns: List[str], path: str) -> None:
@@ -502,11 +540,15 @@ def main() -> int:
             products = fetch_products()
 
         ads_rows, mc_rows, warnings = build_rows(products)
+        rejected: List[str] = []
 
         if not args.force:
-            validate(ads_rows, ADS_COLUMNS, ["ID", "Item title", "Final URL", "Price"],
-                     args.ads_output, "ads feed")
-            validate(mc_rows, MC_COLUMNS, MC_REQUIRED, args.mc_output, "merchant center feed")
+            ads_rows, ads_rejected = validate(
+                ads_rows, ADS_COLUMNS, ["ID", "Item title", "Final URL", "Price"],
+                args.ads_output, "ads feed")
+            mc_rows, mc_rejected = validate(
+                mc_rows, MC_COLUMNS, MC_REQUIRED, args.mc_output, "merchant center feed")
+            rejected = [f"ads: {r}" for r in ads_rejected] + [f"mc: {r}" for r in mc_rejected]
 
         write_tsv(ads_rows, ADS_COLUMNS, args.ads_output)
         write_tsv(mc_rows, MC_COLUMNS, args.mc_output)
@@ -520,6 +562,13 @@ def main() -> int:
     print(f"Merchant rows:     {len(mc_rows)} -> {args.mc_output}")
     print(f"On sale:           {sum(1 for r in mc_rows if r['sale_price'])}")
     print(f"Out of stock:      {sum(1 for r in mc_rows if r['availability'] == 'out_of_stock')}")
+
+    if rejected:
+        print(f"\n{len(rejected)} row(s) rejected and excluded from the feed:")
+        for entry in rejected[:25]:
+            print(f"  - {entry}")
+        if len(rejected) > 25:
+            print(f"  ... and {len(rejected) - 25} more")
 
     if warnings:
         print(f"\n{len(warnings)} warning(s):")
